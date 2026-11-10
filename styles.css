@@ -44,3 +44,13 @@
 .reader{height:100dvh}.reader-body{flex:1 1 auto;overflow:hidden}.reader-frame{min-width:0}.reader-header-title{flex:1;min-width:0}.reader-tools{flex:none}
 @media(max-width:680px){.day-section{margin-top:22px}.day-heading h3{font-size:16px}.lecture-row{padding:15px 12px 12px;gap:12px;min-height:0}.lecture-row-top{gap:11px;padding-left:44px}.lecture-num{width:41px;height:44px;font-size:13px}.lecture-main strong{font-size:13px}.lecture-more{left:12px;top:12px}.lecture-more summary{width:39px;height:39px}.lecture-open{font-size:14px;min-height:48px}.day-heading span{font-size:10px}}
 @media(min-width:681px){.lecture-list{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}}
+
+/* 1.1 — resilient reader loading and retry state */
+.reader-load-status{position:absolute;inset:0;z-index:3;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:12px;padding:28px;text-align:center;background:#f4f8f8;color:#173542}
+.reader-load-status[hidden]{display:none!important}
+.reader-load-status .spinner{width:30px;height:30px}
+.reader-load-status strong{font-size:15px}
+.reader-load-status p{font-size:12px;line-height:1.8;color:#617681;max-width:340px;margin:0}
+.reader-load-status .btn{max-width:240px}
+.reader-load-status:not(.has-problem)>button{opacity:.75}
+.reader-load-status.has-problem .spinner{display:none}

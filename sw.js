@@ -1,5 +1,5 @@
 /* Medical Library — app shell only. Imported lecture files live in IndexedDB. */
-const CACHE = 'medlib-shell-nursing-final-2026-11';
+const CACHE = 'medlib-shell-nursing-reader-fix-2026-11-v1';
 const SHELL = ['./', './index.html', './styles.css', './app.js', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 self.addEventListener('install', event => {
   event.waitUntil((async () => {

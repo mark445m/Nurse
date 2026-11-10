@@ -162,10 +162,77 @@
   function askDeleteSubject(id){const s=subjectOf(id);if(!s)return;const n=countOf(id);confirmDialog('حذف المادة',`سيُحذف «${s.name}» مع ${n} من محاضراتها المحفوظة. احتفظ بنسخة احتياطية إن كنت تحتاجها.`, 'حذف المادة وملفاتها',async()=>{const tx=state.db.transaction(['subjects','lectures'],'readwrite');const done=transactionPromise(tx);tx.objectStore('subjects').delete(id);const store=tx.objectStore('lectures');state.lectures.filter(l=>l.subjectId===id).forEach(l=>store.delete(l.id));await done;state.page='subjects';state.subjectId=null;toast('حُذفت المادة ومحاضراتها');},true);}
   async function moveLecture(id,direction){const l=lectureOf(id);if(!l)return;const ordered=state.lectures.filter(x=>x.subjectId===l.subjectId).sort(sortByOrder);const idx=ordered.findIndex(x=>x.id===id);const other=idx+direction;if(other<0||other>=ordered.length)return;[ordered[idx],ordered[other]]=[ordered[other],ordered[idx]];const updates=ordered.map((item,index)=>({...item,order:index+1}));await saveMany('lectures',updates);await refresh();}
 
-  // A single reader for all screen sizes. CSS adapts it when the viewport changes.
-  function readerHtml(l,s){return `<div class="reader" role="dialog" aria-label="قارئ المحاضرة" aria-modal="true"><div class="reader-header"><button class="reader-close" data-action="close-reader">${icon('arrow')} رجوع</button><div class="reader-header-title"><strong>${h(l.title)}</strong><small>${h(s?.name||'')} · ${l.kind==='pdf'?'PDF':'HTML'}</small></div><div class="reader-tools" aria-label="تكبير وتصغير المحاضرة"><button class="reader-tool" data-action="zoom-out" title="تصغير" aria-label="تصغير">${icon('zoomout')}</button><button class="reader-tool" data-action="zoom-reset" title="الحجم الأصلي" aria-label="الحجم الأصلي" id="zoom-label">100%</button><button class="reader-tool" data-action="zoom-in" title="تكبير" aria-label="تكبير">${icon('zoomin')}</button></div></div><div class="reader-body"><div class="reader-stage" id="reader-stage"><iframe id="lecture-frame" class="reader-frame" title="${h(l.title)}" loading="eager" referrerpolicy="no-referrer" allow="autoplay; fullscreen"></iframe></div></div></div>`;}
-  async function openReader(id){const l=lectureOf(id);if(!l||!(l.blob instanceof Blob)){toast('تعذّر العثور على محتوى هذه المحاضرة',true);return;}if(state.reading)closeReader();const s=subjectOf(l.subjectId);const url=URL.createObjectURL(l.blob);const root=document.getElementById('reader-root');root.innerHTML=readerHtml(l,s);const iframe=root.querySelector('#lecture-frame');if(l.kind==='html')iframe.setAttribute('sandbox','allow-scripts allow-forms allow-modals allow-downloads');iframe.addEventListener('load',()=>{root.querySelector('.reader-bottom')?.classList.remove('loading');});iframe.src=url;state.reading={id,url,zoom:1};document.body.style.overflow='hidden';try{await saveOne('lectures',{...l,lastOpenedAt:Date.now()});}catch(_){} }
-  function closeReader(){if(!state.reading)return;const current=state.reading;state.reading=null;document.getElementById('reader-root').replaceChildren();URL.revokeObjectURL(current.url);document.body.style.overflow='';}
+  // Reader resilience: separate each render attempt, track completion, offer an
+  // alternate HTML rendering path when mobile WebKit fails to display a Blob URL.
+  // Never mutate the stored lecture or its exported backup bytes.
+  function readerHtml(l,s){return `<div class="reader" role="dialog" aria-label="قارئ المحاضرة" aria-modal="true"><div class="reader-header"><button class="reader-close" data-action="close-reader">${icon('arrow')} رجوع</button><div class="reader-header-title"><strong>${h(l.title)}</strong><small>${h(s?.name||'')} · ${l.kind==='pdf'?'PDF':'HTML'}</small></div><div class="reader-tools" aria-label="أدوات المحاضرة"><button class="reader-tool" data-action="retry-reader" title="إعادة تحميل المحاضرة" aria-label="إعادة تحميل المحاضرة">${icon('rotate')}</button><button class="reader-tool" data-action="zoom-out" title="تصغير" aria-label="تصغير">${icon('zoomout')}</button><button class="reader-tool" data-action="zoom-reset" title="الحجم الأصلي" aria-label="الحجم الأصلي" id="zoom-label">100%</button><button class="reader-tool" data-action="zoom-in" title="تكبير" aria-label="تكبير">${icon('zoomin')}</button></div></div><div class="reader-body"><div class="reader-stage" id="reader-stage"></div><div class="reader-load-status" id="reader-load-status" role="status"><div class="spinner"></div><strong id="reader-load-title">جاري فتح المحاضرة…</strong><p id="reader-load-hint">قد يستغرق فتح المحاضرات الكبيرة وقتًا أطول.</p><button type="button" class="btn btn-outline" data-action="retry-reader">إعادة المحاولة</button></div></div></div>`;}
+  function readerStatus(message,problem=false){
+    const box=document.getElementById('reader-load-status');if(!box)return;
+    box.hidden=false;box.classList.toggle('has-problem',problem);
+    const title=document.getElementById('reader-load-title');if(title)title.textContent=message;
+    const hint=document.getElementById('reader-load-hint');if(hint)hint.textContent=problem?'لم تُفتح المحاضرة بعد. اضغط «إعادة المحاولة» دون إغلاق التطبيق.':'قد يستغرق فتح المحاضرات الكبيرة وقتًا أطول.';
+  }
+  function releaseReaderUrl(r){if(r.url){URL.revokeObjectURL(r.url);r.url=null;}}
+  async function loadReaderFrame(alternate=false){
+    const r=state.reading;if(!r)return;
+    const l=lectureOf(r.id);if(!l||!(l.blob instanceof Blob)){readerStatus('ملف المحاضرة غير موجود',true);return;}
+    const attempt=++r.attempt;
+    clearTimeout(r.timer);
+    const stage=document.getElementById('reader-stage');if(!stage)return;
+    stage.replaceChildren();releaseReaderUrl(r);
+    readerStatus(alternate?'جاري إعادة فتح المحاضرة…':'جاري فتح المحاضرة…');
+    const iframe=document.createElement('iframe');iframe.id='lecture-frame';iframe.className='reader-frame';iframe.title=l.title;iframe.loading='eager';iframe.referrerPolicy='no-referrer';iframe.setAttribute('allow','autoplay; fullscreen');
+    if(l.kind==='html')iframe.setAttribute('sandbox','allow-scripts allow-forms allow-modals allow-downloads');
+    iframe.style.width=`${100/r.zoom}%`;iframe.style.height=`${100/r.zoom}%`;iframe.style.transform=`scale(${r.zoom})`;
+    // A fresh frame on every attempt avoids reusing a WebKit renderer that got stuck.
+    let completed=false;
+    iframe.addEventListener('load',()=>{
+      if(state.reading!==r||r.attempt!==attempt||completed)return;
+      completed=true;clearTimeout(r.timer);
+      const status=document.getElementById('reader-load-status');if(status)status.hidden=true;
+    },{once:true});
+    iframe.addEventListener('error',()=>{if(state.reading===r&&r.attempt===attempt)readerStatus('تعذّر فتح المحاضرة',true);},{once:true});
+    r.timer=setTimeout(()=>{
+      if(state.reading===r&&r.attempt===attempt&&!completed)readerStatus('تأخر تحميل المحاضرة',true);
+    },15000);
+    try{
+      // Small/medium HTML lectures use srcdoc first, bypassing intermittent
+      // mobile Blob iframe failures. Larger files keep the lower-memory Blob path.
+      // The retry switches the method, including on files with very large images.
+      const useSrcdoc=l.kind==='html' ? (alternate ? !r.initialSrcdoc : r.initialSrcdoc) : false;
+      if(useSrcdoc){
+        const html=await l.blob.text();
+        if(state.reading!==r||r.attempt!==attempt)return;
+        iframe.srcdoc=html;
+        stage.appendChild(iframe);
+      }else{
+        const url=URL.createObjectURL(l.blob);
+        if(state.reading!==r||r.attempt!==attempt){URL.revokeObjectURL(url);return;}
+        r.url=url;iframe.src=url;
+        stage.appendChild(iframe);
+      }
+    }catch(err){
+      if(state.reading===r&&r.attempt===attempt){console.error(err);readerStatus('تعذّر تحميل الملف، جرّب إعادة المحاولة',true);}
+    }
+  }
+  async function openReader(id){
+    const l=lectureOf(id);if(!l||!(l.blob instanceof Blob)){toast('تعذّر العثور على محتوى هذه المحاضرة',true);return;}
+    if(state.reading)closeReader();
+    const root=document.getElementById('reader-root');root.innerHTML=readerHtml(l,subjectOf(l.subjectId));
+    // The limit prevents copying ~30 MB lectures into JavaScript strings unnecessarily.
+    state.reading={id,url:null,zoom:1,attempt:0,timer:null,initialSrcdoc:l.kind==='html'&&l.blob.size<=12*1024*1024};
+    document.body.style.overflow='hidden';
+    await loadReaderFrame(false);
+    // Reading history is not needed for rendering; failures here must not block it.
+    try{await saveOne('lectures',{...l,lastOpenedAt:Date.now()});}catch(err){console.warn('reading history not saved',err);}
+  }
+  function closeReader(){
+    const r=state.reading;if(!r)return;
+    state.reading=null;clearTimeout(r.timer);
+    document.getElementById('reader-root').replaceChildren();releaseReaderUrl(r);
+    document.body.style.overflow='';
+  }
+  async function retryReader(){const r=state.reading;if(!r)return;await loadReaderFrame(r.attempt%2===1);}
   function setReaderZoom(delta){const r=state.reading;if(!r)return;r.zoom=delta===0?1:Math.min(2,Math.max(.5,Math.round((r.zoom+delta)*10)/10));const iframe=document.getElementById('lecture-frame');if(!iframe)return;iframe.style.width=`${100/r.zoom}%`;iframe.style.height=`${100/r.zoom}%`;iframe.style.transform=`scale(${r.zoom})`;const label=document.getElementById('zoom-label');if(label)label.textContent=`${Math.round(r.zoom*100)}%`;}
 
   async function prepareBackup(){
@@ -277,6 +344,7 @@
       case 'move-down':await moveLecture(id,1);break;
       case 'read':await openReader(id);break;
       case 'close-reader':closeReader();break;
+      case 'retry-reader':await retryReader();break;
       case 'zoom-in':setReaderZoom(.1);break;
       case 'zoom-out':setReaderZoom(-.1);break;
       case 'zoom-reset':setReaderZoom(0);break;
